@@ -26,8 +26,9 @@ from dataset.CVUSA import CVUSA
 # from dataset.CVACT import CVACT
 from model.TransGeo import TransGeo
 from criterion.soft_triplet import SoftTripletBiLoss
-from dataset.global_sampler import DistributedMiningSampler,DistributedMiningSamplerVigor
+from dataset.global_sampler import DistributedMiningSampler
 from criterion.sam import SAM
+from criterion.unsup_loss import jsd_loss, softmax_kl_loss
 from ptflops import get_model_complexity_info
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -324,15 +325,8 @@ def main_worker(gpu, ngpus_per_node, args):
             os.mkdir(os.path.join(args.save_path, 'attention','train'))
             os.mkdir(os.path.join(args.save_path, 'attention','val'))
 
-    # if args.dataset == 'vigor':
-    #     dataset = VIGOR
-    #     mining_sampler = DistributedMiningSamplerVigor
-    # elif args.dataset == 'cvusa':
     dataset = CVUSA
     mining_sampler = DistributedMiningSampler
-    # elif args.dataset == 'cvact':
-    #     dataset = CVACT
-    #     mining_sampler = DistributedMiningSampler
 
     lbl_train_dataset = dataset(mode='train', print_bool=True, train_file='train-19zl_20%_1.csv', same_area=(not args.cross),args=args)
     unlbl_train_dataset = dataset(mode='train', print_bool=True, train_file='train-19zl_80%_1.csv', same_area=(not args.cross),args=args)
@@ -342,11 +336,11 @@ def main_worker(gpu, ngpus_per_node, args):
     val_query_dataset = dataset(mode='test_query', same_area=(not args.cross), train_file='train-19zl_20%_1.csv', args=args)
     val_reference_dataset = dataset(mode='test_reference', same_area=(not args.cross), train_file='train-19zl_20%_1.csv', args=args)
     # print(len(lbl_train_dataset), len(unlbl_train_dataset), len(train_scan_dataset), len(val_scan_dataset), len(val_query_dataset), len(val_reference_dataset))
-
     # exit()
+
     if args.distributed:
         if args.mining:
-            train_sampler = mining_sampler(lbl_train_dataset, batch_size=args.batch_size, dim=args.dim, save_path=args.save_path)
+            train_sampler = mining_sampler(lbl_train_dataset, batch_size=args.batch_size//2, dim=args.dim, save_path=args.save_path)
             if args.resume:
                 train_sampler.load(args.resume.replace(args.resume.split('/')[-1],''))
         else:
@@ -428,13 +422,6 @@ def main_worker(gpu, ngpus_per_node, args):
 def data_concat(ip1, ip2, dims=0):
     return torch.cat([ip1, ip2], dim=dims)
 
-def jsd_loss(feat, ema_feat):
-    feat += 1e-7
-    ema_feat += 1e-7
-    consistency_criterion = torch.nn.KLDivLoss(size_average=False, reduce=False).cuda()
-    cons_loss_a = consistency_criterion(feat.log(), ema_feat.detach()).sum(-1).mean()
-    cons_loss_b = consistency_criterion(ema_feat.log(), feat.detach()).sum(-1).mean()
-    return cons_loss_a + cons_loss_b
 
 
 def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, optimizer, epoch, args, global_steps, train_sampler=None):
@@ -517,14 +504,18 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
             embed_qs, embed_ks = model(im_q=concat_strong_images_q, im_k=concat_strong_images_k, delta=concat_delta)
             with torch.no_grad():
                 embed_qt, embed_kt = ema_model(im_q=concat_weak_images_q, im_k=concat_weak_images_k, delta=concat_delta)
-        # print(embed_qs.shape, embed_ks.shape, embed_qt.shape, embed_kt.shape)
+        print(embed_qs.shape, embed_ks.shape, embed_qt.shape, embed_kt.shape)
 
         # SUP LOSS
         sup_loss, mean_p, mean_n = criterion(embed_qs[labeled_idxs], embed_ks[labeled_idxs])
 
         # UNSUP LOSS
-        unsup_loss_q = jsd_loss(embed_qs, embed_qt)
-        unsup_loss_k = jsd_loss(embed_ks, embed_kt)
+        # unsup_loss_q = jsd_loss(embed_qs, embed_qt)
+        # unsup_loss_k = jsd_loss(embed_ks, embed_kt)
+
+        unsup_loss_q = torch.nn.MSELoss()(embed_qs, embed_qt)
+        unsup_loss_k = torch.nn.MSELoss()(embed_ks, embed_kt)
+        
 
         loss = sup_loss + unsup_loss_q + unsup_loss_k 
         print(sup_loss, unsup_loss_k, unsup_loss_q)
