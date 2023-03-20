@@ -456,8 +456,7 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
     lbl_iterloader = iter(lbl_train_loader)
 
     for i, (images_qu, images_ku, indexes_u, _, delta_u, atten_u) in enumerate(unlbl_train_loader):
-        print(indexes_u, delta_u, atten_u)
-
+        global_steps+=1
         try:
             images_ql, images_kl, indexes_l, _, delta_l, atten_l = next(lbl_iterloader)
         except:
@@ -469,6 +468,7 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
 
         if args.gpu is not None:
             
+            # Q - BSx3x112x616, K - BSx3x256x256
             images_qu = images_qu.cuda(args.gpu, non_blocking=True)
             images_ku = images_ku.cuda(args.gpu, non_blocking=True)
             indexes_u = indexes_u.cuda(args.gpu, non_blocking=True)
@@ -477,8 +477,8 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
             images_kl = images_kl.cuda(args.gpu, non_blocking=True)
             indexes_l = indexes_l.cuda(args.gpu, non_blocking=True)
         
-        print(images_ql.shape, images_qu.shape)
-        print(images_ku.shape, images_kl.shape)
+        # print(images_ql.shape, images_qu.shape)
+        # print(images_ku.shape, images_kl.shape)
         random_indices = torch.randperm(len(indexes_u) + len(indexes_l))
 
         # # reshuffle original data
@@ -495,12 +495,13 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
         concat_labels = data_concat(torch.Tensor([1]*len(indexes_l)), torch.Tensor([1]*len(indexes_u)))[random_indices]
 
         labeled_idxs = torch.where(concat_labels==1)[0] 
-        orig_img = concat_weak_images_q[0].cpu().detach().numpy()
-        flip_img = concat_strong_images_q[0].cpu().detach().numpy()
         
-        import cv2
-        cv2.imwrite('orig.png', (np.transpose(orig_img, [1, 2, 0])*255).astype(np.uint8))
-        cv2.imwrite('flip.png', (np.transpose(flip_img, [1, 2, 0])*255).astype(np.uint8))
+        # # debug mode
+        # import cv2
+        # orig_img = concat_weak_images_q[0].cpu().detach().numpy()
+        # flip_img = concat_strong_images_q[0].cpu().detach().numpy()
+        # cv2.imwrite('orig.png', (np.transpose(orig_img, [1, 2, 0])*255).astype(np.uint8))
+        # cv2.imwrite('flip.png', (np.transpose(flip_img, [1, 2, 0])*255).astype(np.uint8))
         
         # EMA update
         update_ema(model, ema_model, global_steps, 0.99)
@@ -508,30 +509,31 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
         
         # compute output
         if args.crop:
+            # 32x1000 Qand K embedding size
             embed_qs, embed_ks = model(im_q=concat_strong_images_q, im_k=concat_strong_images_k, delta=concat_delta, atten=concat_atten)
             with torch.no_grad():
                 embed_qt, embed_kt = ema_model(im_q=concat_weak_images_q, im_k=concat_weak_images_k, delta=concat_delta, atten=concat_atten)
         else:
-            # embed_q, embed_k = model(im_q =concat_strong_images_q, im_k=concat_strong_images_k, delta=concat_delta)
             embed_qs, embed_ks = model(im_q=concat_strong_images_q, im_k=concat_strong_images_k, delta=concat_delta)
             with torch.no_grad():
                 embed_qt, embed_kt = ema_model(im_q=concat_weak_images_q, im_k=concat_weak_images_k, delta=concat_delta)
-        print(embed_qs.shape, embed_ks.shape, embed_qt.shape, embed_kt.shape)
+        # print(embed_qs.shape, embed_ks.shape, embed_qt.shape, embed_kt.shape)
 
-        sup_loss, mean_p, mean_n = criterion(embed_qs[concat_labels], embed_ks[concat_labels])
+        # SUP LOSS
+        sup_loss, mean_p, mean_n = criterion(embed_qs[labeled_idxs], embed_ks[labeled_idxs])
 
+        # UNSUP LOSS
         unsup_loss_q = jsd_loss(embed_qs, embed_qt)
         unsup_loss_k = jsd_loss(embed_ks, embed_kt)
 
         loss = sup_loss + unsup_loss_q + unsup_loss_k 
         print(sup_loss, unsup_loss_k, unsup_loss_q)
 
-        exit()
         if args.mining:
-            train_sampler.update(concat_all_gather(embed_k).detach().cpu().numpy(),concat_all_gather(embed_q).detach().cpu().numpy(),concat_all_gather(indexes).detach().cpu().numpy())
-        losses.update(loss.item(), images_q.size(0))
-        mean_ps.update(mean_p, images_q.size(0))
-        mean_ns.update(mean_n, images_q.size(0))
+            train_sampler.update(concat_all_gather(embed_ks[labeled_idxs]).detach().cpu().numpy(),concat_all_gather(embed_qs[labeled_idxs]).detach().cpu().numpy(),concat_all_gather(concat_indexes[labeled_idxs]).detach().cpu().numpy())
+        losses.update(loss.item(), concat_weak_images_q.size(0))
+        mean_ps.update(mean_p, concat_weak_images_q.size(0))
+        mean_ns.update(mean_n, concat_weak_images_q.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -542,12 +544,29 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
             optimizer.first_step(zero_grad=True)
 
             # second forward-backward pass, only for ASAM
-            if args.crop:
-                embed_q, embed_k = model(im_q=images_q, im_k=images_k, delta=delta, atten=atten)
-            else:
-                embed_q, embed_k = model(im_q=images_q, im_k=images_k, delta=delta)
+            # if args.crop:
+            #     embed_q, embed_k = model(im_q=images_q, im_k=images_k, delta=delta, atten=atten)
+            # else:
+            #     embed_q, embed_k = model(im_q=images_q, im_k=images_k, delta=delta)
+            # loss, mean_p, mean_n = criterion(embed_q, embed_k)
 
-            loss, mean_p, mean_n = criterion(embed_q, embed_k)
+            if args.crop:
+                embed_qs, embed_ks = model(im_q=concat_strong_images_q, im_k=concat_strong_images_k, delta=concat_delta, atten=concat_atten)
+                with torch.no_grad():
+                    embed_qt, embed_kt = ema_model(im_q=concat_weak_images_q, im_k=concat_weak_images_k, delta=concat_delta, atten=concat_atten)
+            else:
+                embed_qs, embed_ks = model(im_q=concat_strong_images_q, im_k=concat_strong_images_k, delta=concat_delta)
+                with torch.no_grad():
+                    embed_qt, embed_kt = ema_model(im_q=concat_weak_images_q, im_k=concat_weak_images_k, delta=concat_delta)
+            
+            # SUP LOSS
+            sup_loss, mean_p, mean_n = criterion(embed_qs[labeled_idxs], embed_ks[labeled_idxs])
+
+            # UNSUP LOSS
+            unsup_loss_q = jsd_loss(embed_qs, embed_qt)
+            unsup_loss_k = jsd_loss(embed_ks, embed_kt)
+
+            loss = sup_loss + unsup_loss_q + unsup_loss_k 
             loss.backward()
             optimizer.second_step(zero_grad=True)
 
@@ -561,6 +580,7 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
         del loss
         del embed_q
         del embed_k
+        return global_steps
 
 
 # save all the attention map
