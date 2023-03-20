@@ -479,7 +479,7 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
         concat_delta = data_concat(delta_l, delta_u)[random_indices]
         concat_atten = data_concat(atten_l, atten_u)[random_indices]
         
-        concat_labels = data_concat(torch.Tensor([1]*len(indexes_l)), torch.Tensor([1]*len(indexes_u)))[random_indices]
+        concat_labels = data_concat(torch.Tensor([1]*len(indexes_l)), torch.Tensor([0]*len(indexes_u)))[random_indices]
 
         labeled_idxs = torch.where(concat_labels==1)[0] 
         
@@ -506,6 +506,9 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
                 embed_qt, embed_kt = ema_model(im_q=concat_weak_images_q, im_k=concat_weak_images_k, delta=concat_delta)
         print(embed_qs.shape, embed_ks.shape, embed_qt.shape, embed_kt.shape)
 
+        print(labeled_idxs, concat_labels)
+        print(embed_qs[labeled_idxs].shape, embed_ks[labeled_idxs].shape)
+        # exit()
         # SUP LOSS
         sup_loss, mean_p, mean_n = criterion(embed_qs[labeled_idxs], embed_ks[labeled_idxs])
 
@@ -535,12 +538,6 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
             optimizer.first_step(zero_grad=True)
 
             # second forward-backward pass, only for ASAM
-            # if args.crop:
-            #     embed_q, embed_k = model(im_q=images_q, im_k=images_k, delta=delta, atten=atten)
-            # else:
-            #     embed_q, embed_k = model(im_q=images_q, im_k=images_k, delta=delta)
-            # loss, mean_p, mean_n = criterion(embed_q, embed_k)
-
             if args.crop:
                 embed_qs, embed_ks = model(im_q=concat_strong_images_q, im_k=concat_strong_images_k, delta=concat_delta, atten=concat_atten)
                 with torch.no_grad():
@@ -554,8 +551,8 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
             sup_loss, mean_p, mean_n = criterion(embed_qs[labeled_idxs], embed_ks[labeled_idxs])
 
             # UNSUP LOSS
-            unsup_loss_q = jsd_loss(embed_qs, embed_qt)
-            unsup_loss_k = jsd_loss(embed_ks, embed_kt)
+            unsup_loss_q = torch.nn.MSELoss()(embed_qs, embed_qt)
+            unsup_loss_k = torch.nn.MSELoss()(embed_ks, embed_kt)
 
             loss = sup_loss + unsup_loss_q + unsup_loss_k 
             loss.backward()
