@@ -56,6 +56,8 @@ def parse_args():
                             'using Data Parallel or Distributed Data Parallel')
     parser.add_argument('--lr', '--learning-rate', default=0.03, type=float,
                         metavar='LR', help='initial learning rate', dest='lr')
+    parser.add_argument('-wt_ul', '--weight_unsup', default=1.0, type=float,
+                         help='unsup loss weight')
     parser.add_argument('--schedule', default=[120, 160], nargs='*', type=int,
                         help='learning rate schedule (when to drop lr by 10x)')
     parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
@@ -63,7 +65,7 @@ def parse_args():
     parser.add_argument('--wd', '--weight-decay', default=0, type=float,
                         metavar='W', help='weight decay (default: 1e-4)',
                         dest='weight_decay')
-    parser.add_argument('-p', '--print-freq', default=10, type=int,
+    parser.add_argument('-p', '--print-freq', default=50, type=int,
                         metavar='N', help='print frequency (default: 10)')
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
                         help='path to latest checkpoint (default: none)')
@@ -88,6 +90,12 @@ def parse_args():
                             'multi node data parallel training')
     parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                         help='evaluate model on validation set')
+    
+    # Load data
+    parser.add_argument('-l', '--lbl_file', default='train-19zl_20%_1.csv', type=str,
+                        help='path to label file')
+    parser.add_argument('-ul', '--unlbl_file', default='train-19zl_80%_1.csv', type=str,
+                        help='path to unlabel file')
 
     # moco specific configs:
     parser.add_argument('--dim', default=1000, type=int,
@@ -328,13 +336,13 @@ def main_worker(gpu, ngpus_per_node, args):
     dataset = CVUSA
     mining_sampler = DistributedMiningSampler
 
-    lbl_train_dataset = dataset(mode='train', print_bool=True, train_file='train-19zl_20%_1.csv', same_area=(not args.cross),args=args)
-    unlbl_train_dataset = dataset(mode='train', print_bool=True, train_file='train-19zl_80%_1.csv', same_area=(not args.cross),args=args)
+    lbl_train_dataset = dataset(mode='train', print_bool=True, train_file=args.lbl_file, same_area=(not args.cross),args=args)
+    unlbl_train_dataset = dataset(mode='train', print_bool=True, train_file=args.unlbl_file, same_area=(not args.cross),args=args)
     
-    train_scan_dataset = dataset(mode='scan_train' if args.dataset == 'vigor' else 'train', train_file='train-19zl_20%_1.csv', print_bool=True, same_area=(not args.cross), args=args)
-    val_scan_dataset = dataset(mode='scan_val', same_area=(not args.cross), train_file='train-19zl_20%_1.csv', args=args)
-    val_query_dataset = dataset(mode='test_query', same_area=(not args.cross), train_file='train-19zl_20%_1.csv', args=args)
-    val_reference_dataset = dataset(mode='test_reference', same_area=(not args.cross), train_file='train-19zl_20%_1.csv', args=args)
+    train_scan_dataset = dataset(mode='scan_train' if args.dataset == 'vigor' else 'train', train_file=args.lbl_file, print_bool=True, same_area=(not args.cross), args=args)
+    val_scan_dataset = dataset(mode='scan_val', same_area=(not args.cross), train_file=args.lbl_file, args=args)
+    val_query_dataset = dataset(mode='test_query', same_area=(not args.cross), train_file=args.lbl_file, args=args)
+    val_reference_dataset = dataset(mode='test_reference', same_area=(not args.cross), train_file=args.lbl_file, args=args)
     # print(len(lbl_train_dataset), len(unlbl_train_dataset), len(train_scan_dataset), len(val_scan_dataset), len(val_query_dataset), len(val_reference_dataset))
     # exit()
 
@@ -504,12 +512,12 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
             embed_qs, embed_ks = model(im_q=concat_strong_images_q, im_k=concat_strong_images_k, delta=concat_delta)
             with torch.no_grad():
                 embed_qt, embed_kt = ema_model(im_q=concat_weak_images_q, im_k=concat_weak_images_k, delta=concat_delta)
-        print(embed_qs.shape, embed_ks.shape, embed_qt.shape, embed_kt.shape)
+        #print(embed_qs.shape, embed_ks.shape, embed_qt.shape, embed_kt.shape)
 
-        print(labeled_idxs, concat_labels)
-        print(embed_qs[labeled_idxs].shape, embed_ks[labeled_idxs].shape)
+        #print(labeled_idxs, concat_labels)
+        #print(embed_qs[labeled_idxs].shape, embed_ks[labeled_idxs].shape)
         # exit()
-        # SUP LOSS
+        # SUP LOS[S
         sup_loss, mean_p, mean_n = criterion(embed_qs[labeled_idxs], embed_ks[labeled_idxs])
 
         # UNSUP LOSS
@@ -520,14 +528,14 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
         unsup_loss_k = torch.nn.MSELoss()(embed_ks, embed_kt)
         
 
-        loss = sup_loss + unsup_loss_q + unsup_loss_k 
-        print(sup_loss, unsup_loss_k, unsup_loss_q)
+        loss = sup_loss + args.weight_unsup(unsup_loss_q + unsup_loss_k) 
+        # print(sup_loss, unsup_loss_k, unsup_loss_q)
 
         if args.mining:
             train_sampler.update(concat_all_gather(embed_ks[labeled_idxs]).detach().cpu().numpy(),concat_all_gather(embed_qs[labeled_idxs]).detach().cpu().numpy(),concat_all_gather(concat_indexes[labeled_idxs]).detach().cpu().numpy())
         losses.update(loss.item(), concat_weak_images_q.size(0))
-        mean_ps.update(mean_p, concat_weak_images_q.size(0))
-        mean_ns.update(mean_n, concat_weak_images_q.size(0))
+        mean_ps.update(mean_p, concat_weak_images_q.size(0)) # sup only - CHECK IT LATER
+        mean_ns.update(mean_n, concat_weak_images_q.size(0)) # sup only - CHECK IT LATER 
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -566,9 +574,9 @@ def train(lbl_train_loader, unlbl_train_loader, model, ema_model, criterion, opt
             progress.display(i)
 
         del loss
-        del embed_q
-        del embed_k
-        return global_steps
+        del embed_qs, embed_qt
+        del embed_ks, embed_kt
+    return global_steps
 
 
 # save all the attention map
